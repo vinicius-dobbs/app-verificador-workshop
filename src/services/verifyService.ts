@@ -1,36 +1,35 @@
 import { Linking } from "react-native";
+import type { CredentialOption } from "./certifyService";
 
 const BASE_URL = process.env.EXPO_PUBLIC_BASE_URL!;
 const CLIENT_ID = process.env.EXPO_PUBLIC_CLIENT_ID!;
 const ORIGIN = "brejame://";
 
-const PRESENTATION_DEFINITION = {
-  id: "eca-age-verification",
-  purpose: "Verificação de idade conforme o Estatuto da Criança e do Adolescente",
-  format: {
-    ldp_vc: {
-      proof_type: ["Ed25519Signature2020"],
-    },
-  },
-  input_descriptors: [
-    {
-      id: "eca credential",
-      format: {
-        ldp_vc: {
-          proof_type: ["Ed25519Signature2020"],
-        },
-      },
+function presentationDefinition(credential: CredentialOption) {
+  if (!credential.credentialType || credential.format !== "ldp_vc") {
+    throw new Error("Este formato de credencial ainda não é suportado neste verificador.");
+  }
+
+  return {
+    id: credential.isEca ? "eca-age-verification" : `credential-${credential.id}`,
+    purpose: credential.isEca
+      ? "Verificação de idade conforme o Estatuto da Criança e do Adolescente"
+      : `Verificação da credencial ${credential.name}`,
+    format: { ldp_vc: { proof_type: ["Ed25519Signature2020"] } },
+    input_descriptors: [{
+      id: credential.isEca ? "eca credential" : credential.id,
+      format: { ldp_vc: { proof_type: ["Ed25519Signature2020"] } },
       constraints: {
-        fields: [
-          {
-            path: ["$.type"],
-            filter: { type: "object", pattern: "ECACredential" },
-          },
-        ],
+        fields: [{
+          path: ["$.type"],
+          filter: credential.isEca
+            ? { type: "object", pattern: "ECACredential" }
+            : { type: "object", pattern: credential.credentialType },
+        }],
       },
-    },
-  ],
-};
+    }],
+  };
+}
 
 
 type QrData = {
@@ -39,6 +38,19 @@ type QrData = {
   requestUri: string;
   expiresAt?: number;
 };
+
+async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error("O Verify demorou para responder. Tente novamente.");
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function buildDeepLinkUrl(data: QrData): string {
   const params = new URLSearchParams();
@@ -52,26 +64,28 @@ function buildDeepLinkUrl(data: QrData): string {
   return `openid4vp://authorize?${params.toString()}`;
 }
 
-export async function createVPRequest(): Promise<{
+export async function createVPRequest(credential: CredentialOption, timeoutMs = 15000): Promise<{
   transactionId: string;
   requestId: string;
   deepLinkUrl: string;
 }> {
-  const response = await fetch(`${BASE_URL}/v1/verify/vp-request`, {
+  const response = await fetchWithTimeout(`${BASE_URL}/v1/verify/vp-request`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       clientId: CLIENT_ID,
-      presentationDefinition: PRESENTATION_DEFINITION,
+      presentationDefinition: presentationDefinition(credential),
     }),
-  });
+  }, timeoutMs);
 
   if (!response.ok) {
-    throw new Error("Failed to create VP request");
+    throw new Error(`Não foi possível criar a solicitação de verificação (${response.status}).`);
   }
 
   const data: QrData = await response.json();
-  console.log('[createVPRequest] response:', JSON.stringify(data));
+  if (!data.requestId || !data.transactionId) {
+    throw new Error("O Verify não retornou os identificadores da solicitação.");
+  }
   const deepLinkUrl = buildDeepLinkUrl(data);
 
   return {
@@ -82,62 +96,62 @@ export async function createVPRequest(): Promise<{
 }
 
 export async function pollVPStatus(
-  requestId: string
+  requestId: string,
+  timeoutMs = 15000
 ): Promise<"ACTIVE" | "VP_SUBMITTED" | "EXPIRED"> {
-  const response = await fetch(
-    `${BASE_URL}/v1/verify/vp-request/${requestId}/status`
+  const response = await fetchWithTimeout(
+    `${BASE_URL}/v1/verify/vp-request/${encodeURIComponent(requestId)}/status`,
+    {}, timeoutMs
   );
-  const raw = await response.text();
-  console.log('[pollVPStatus] status:', response.status, 'body:', raw);
   if (!response.ok) {
-    throw new Error(`Failed to fetch VP status: ${response.status} ${raw}`);
+    throw new Error(`Não foi possível consultar a solicitação (${response.status}).`);
   }
-  const data = JSON.parse(raw);
+  const data = await response.json();
+  if (data.status !== "ACTIVE" && data.status !== "VP_SUBMITTED" && data.status !== "EXPIRED") {
+    throw new Error("O Verify retornou um status de solicitação desconhecido.");
+  }
   return data.status;
 }
 
+export type VPResult = {
+  verified: boolean;
+  credentials: { vc: unknown; verificationStatus: string }[];
+};
+
 export async function getVPResult(
-  transactionId: string
-): Promise<{ verified: boolean; underage?: boolean }> {
-  const response = await fetch(
-    `${BASE_URL}/v1/verify/vp-result/${transactionId}`
+  transactionId: string,
+  timeoutMs = 15000
+): Promise<VPResult> {
+  const response = await fetchWithTimeout(
+    `${BASE_URL}/v1/verify/vp-result/${encodeURIComponent(transactionId)}`,
+    {}, timeoutMs
   );
 
-  const rawText = await response.text();
-  console.log('[getVPResult] status:', response.status, 'body:', rawText);
-
   if (!response.ok) {
-    throw new Error(`Failed to get VP result: ${response.status} ${rawText}`);
+    throw new Error(`Não foi possível consultar o resultado (${response.status}).`);
   }
 
-  const data = JSON.parse(rawText);
-  console.log('[getVPResult] parsed data:', JSON.stringify(data));
-
-  if (data.vpResultStatus !== "SUCCESS" || !data.vcResults?.length) {
-    throw new Error(`VP result unavailable: status=${data.vpResultStatus}, vcResults=${JSON.stringify(data.vcResults)}`);
+  const data = await response.json();
+  if (data.vpResultStatus !== "SUCCESS" && data.vpResultStatus !== "FAILED") {
+    throw new Error("Resultado da apresentação ainda não disponível.");
   }
-
-  const vcRaw = data.vcResults[0].vc;
-  console.log('[getVPResult] vcRaw:', vcRaw);
-  const vc = typeof vcRaw === 'string' ? JSON.parse(vcRaw) : vcRaw;
-  console.log('[getVPResult] vc parsed:', JSON.stringify(vc));
-
-  // Try multiple paths for isOver18
-  const subject = vc?.credential?.credentialSubject
-    ?? vc?.credentialSubject
-    ?? vc;
-  console.log('[getVPResult] credentialSubject:', JSON.stringify(subject));
-  const isOver18 = subject?.isOver18 === true;
-
-  return { verified: isOver18, underage: !isOver18 };
+  return {
+    verified: data.vpResultStatus === "SUCCESS",
+    credentials: Array.isArray(data.vcResults)
+      ? data.vcResults.filter((result: unknown) => result && typeof result === "object")
+        .map((result: { vc?: unknown; verificationStatus?: string }) => ({
+          vc: result.vc,
+          verificationStatus: result.verificationStatus || "DESCONHECIDO",
+        }))
+      : [],
+  };
 }
 
-export async function openWalletForVerification(): Promise<{
+export async function openWalletForVerification(credential: CredentialOption, timeoutMs = 15000): Promise<{
   transactionId: string;
   requestId: string;
 }> {
-  const { transactionId, requestId, deepLinkUrl } = await createVPRequest();
-  console.log("Deep link URL:", deepLinkUrl);
+  const { transactionId, requestId, deepLinkUrl } = await createVPRequest(credential, timeoutMs);
   try {
     await Linking.openURL(deepLinkUrl);
   } catch (error) {

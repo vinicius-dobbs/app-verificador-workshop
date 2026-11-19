@@ -1,73 +1,15 @@
-# Breja.me
+# Breja.me — verificador da oficina
 
-Mock app de delivery de cerveja com **um único produto**: 1 garrafa de cerveja.
+App Expo para solicitar apresentações OpenID4VP ao Inji Verify. Ao abrir, consulta as configurações ativas do Certify e mostra as credenciais disponíveis. A `ECACredential` leva à vitrine Breja.me e à verificação original de maioridade; as demais credenciais `ldp_vc` levam à verificação da credencial escolhida e à exibição do conteúdo retornado pelo Verify.
 
-Protótipo navegável com 3 telas, estilo brutalista, sem backend real.
+## Configuração
 
-## Stack
+Copie `.env.example` para `.env` e configure as três variáveis para o **mesmo ambiente**:
 
-- Expo (React Native) + TypeScript
-- React Navigation (Native Stack)
-- StyleSheet puro (sem libs de UI)
+- `EXPO_PUBLIC_BASE_URL`: URL pública do Verify (na oficina local: `http://<WORKSHOP_HOST>:31180`).
+- `EXPO_PUBLIC_CLIENT_ID`: DID do verificador (na oficina local: `did:web:<WORKSHOP_HOST>%3A31180:v1:verify`).
+- `EXPO_PUBLIC_CERTIFY_WELLKNOWN_URL`: URL completa do catálogo Certify (na oficina local: `http://<WORKSHOP_HOST>:31090/v1/certify/.well-known/openid-credential-issuer`).
 
-## Pré-requisitos
+Instale as dependências com `npm install` e inicie com `npm start` ou `npm run android`. Esses scripts usam a porta **8082** do Metro; o Guarda pode continuar na **8081**. Se executar `npx expo run:android` diretamente, informe `--port 8082`, pois esse comando não usa os scripts do projeto. Reinicie o Metro após alterar o `.env`. O dispositivo deve conseguir alcançar Certify e Verify e ter uma carteira compatível com `openid4vp://`.
 
-- [Node.js](https://nodejs.org/) v18+
-- [Expo Go](https://expo.dev/go) no celular (opcional, para teste em dispositivo físico)
-
-## Instalação
-
-```bash
-npm install
-```
-
-## Executando
-
-```bash
-npx expo start
-```
-
-Opções após iniciar:
-
-| Tecla | Ação |
-|-------|------|
-| `w`   | Abrir no navegador (web) |
-| `i`   | Abrir no iOS Simulator (requer Xcode) |
-| `a`   | Abrir no Android Emulator (requer Android Studio) |
-| `s`   | Trocar para Expo Go e escanear QR code no celular |
-
-Para iniciar direto na web (não requer simulador):
-
-```bash
-npx expo start --web
-```
-
-## Fluxo do app
-
-1. **Vitrine** — Card com "1 Garrafa de Cerveja", R$ 12,90, botão COMPRAR
-2. **Verificação de Idade** — Botão "Verificar Idade" chama mock backend (~1.2s de delay)
-3. **Sucesso** — Tela verde com checkmark, "Idade verificada", requestId no rodapé
-
-## Simulando falha na verificação
-
-Em `src/services/mockBackend.ts`, altere:
-
-```ts
-const SIMULATE_FAILURE = true;
-```
-
-Isso faz o `verifyAge()` retornar `{ ok: false }`, exibindo uma mensagem de erro vermelha na tela de verificação.
-
-## Estrutura
-
-```
-src/
-├── navigation/
-│   └── AppNavigator.tsx        # Stack Navigator (3 rotas)
-├── screens/
-│   ├── StorefrontScreen.tsx    # Vitrine do produto
-│   ├── AgeCheckScreen.tsx      # Verificação de idade
-│   └── SuccessScreen.tsx       # Tela de sucesso
-└── services/
-    └── mockBackend.ts          # Mock de API com setTimeout
-```
+Selecione uma credencial publicada no catálogo. Formatos diferentes de `ldp_vc` ficam listados, mas desabilitados: este app só monta VP requests para VCs JSON-LD com um tipo de domínio anunciado em `credential_definition.type`. Sucesso depende da validação do Verify, não apenas da apresentação pela carteira. A tela de resultado exibe a VC retornada pelo backend; evite usá-la com dados reais sensíveis em ambiente de demonstração.
